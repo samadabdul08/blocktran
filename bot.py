@@ -1,13 +1,13 @@
 from flask import Flask, request
 import requests
+import os
 import asyncio
 from telegram import Bot
 from datetime import datetime
 
 app = Flask(__name__)
-
-TELEGRAM_TOKEN = "YAHAN_TOKEN_DAALO"
-CHAT_ID = "YAHAN_CHAT_ID_DAALO"
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID")
 
 WALLET_LABELS = {
     "0xwallet1": "Main Wallet",
