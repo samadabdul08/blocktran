@@ -10,7 +10,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
 WALLET_LABELS = {
-    "0x4cc3afdd2bbd02c43a657ef83c9ace59a17dbf0c": "Main Wallet",
+    "0x2b4622c73d4d7bdfe224ca48cb0302d4ad7b4c17": "Main Wallet",,
 }
 
 bot = Bot(token=TELEGRAM_TOKEN)
