@@ -87,7 +87,7 @@ def webhook():
             fee_eth = gas_used / 1e18
             fee_usd = fee_eth * price
 
-            label = WALLET_LABELS.get(to_addr) or WALLET_LABELS.get(from_addr) or "Unknown Wallet"
+            label = WALLET_LABELS.get(to_addr) or WALLET_LABELS.get(from_addr) or ""My Wallet""
 
             # Detect type
             tx_type, type_emoji = detect_tx_type(tx, logs)
@@ -122,7 +122,7 @@ def webhook():
             decimals = int(transfer.get("tokenDecimals", 18))
             amount = int(transfer.get("value", 0)) / (10 ** decimals)
 
-            label = WALLET_LABELS.get(to_addr) or WALLET_LABELS.get(from_addr) or "Unknown Wallet"
+            label = WALLET_LABELS.get(to_addr) or WALLET_LABELS.get(from_addr) or ""My Wallet""
 
             if to_addr in WALLET_LABELS:
                 emoji = "🟢"
