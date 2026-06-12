@@ -6,6 +6,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.exceptions import TelegramBadRequest
 from dotenv import load_dotenv
 from database import add_wallet, get_user_wallets, update_wallet_name, remove_wallet
 
@@ -190,11 +191,15 @@ async def process_chain_selection(callback: types.CallbackQuery, state: FSMConte
         for c in evm_chains:
             success, _ = add_wallet(callback.from_user.id, address, c, "")
             if success:
-                added += 1
-        await callback.message.edit_text(
-            f"✅ Added to <b>{added}</b> EVM chains!\n<code>{address}</code>",
-            parse_mode="HTML"
-        )
+                    added += 1
+            try:
+                await callback.message.edit_text(
+                    f"✅ Added to <b>{added}</b> EVM chains!\n<code>{address}</code>",
+                    parse_mode="HTML"
+                )
+            except TelegramBadRequest as e:
+                if "message is not modified" not in str(e):
+                    raise
     else:
         await state.update_data(address=address, chain=chain)
         await state.set_state(WalletStates.waiting_for_name)
