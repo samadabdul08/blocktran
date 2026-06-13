@@ -39,6 +39,12 @@ def get_user_wallets(user_id):
 def get_all_wallets():
     return list(wallets_collection.find({"active": True}))
 
+def get_user_by_wallet(address, chain):
+    return wallets_collection.find_one({
+        "address": address.lower(),
+        "chain": chain,
+        "active": True
+    })
 def update_wallet_name(user_id, address, chain, new_name):
     wallets_collection.update_one(
         {"user_id": str(user_id), "address": address.lower(), "chain": chain},
