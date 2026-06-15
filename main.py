@@ -16,6 +16,20 @@ MORALIS_STREAM_SECRET = os.getenv("MORALIS_STREAM_SECRET", "")
 
 app = FastAPI()
 
+# Dedup: yaad rakho kaunsi tx pehle bhej chuke hain (alert dobara na ho)
+SEEN_TX = set()
+
+# Stablecoins -> hamesha $1 (API call ki zaroorat nahi)
+STABLECOINS = {
+    "usdt", "usdc", "dai", "busd", "tusd", "usdp", "bsc-usd",
+    "fdusd", "usde", "usdd",
+}
+
+# Spam / scam tokens jo block karne hain (lowercase symbol ya naam)
+SPAM_TOKENS = {
+    "布布",  # tumhare screenshot wala spam token
+}
+
 CHAIN_INFO = {
     "0x1": ("ethereum", "ETH"),
     "0x38": ("bsc", "BNB"),
@@ -34,8 +48,24 @@ COINGECKO_IDS = {
 }
 
 
+def is_spam(token_name: str, token_symbol: str) -> bool:
+    name = (token_name or "").strip().lower()
+    sym = (token_symbol or "").strip().lower()
+    if name in SPAM_TOKENS or sym in SPAM_TOKENS:
+        return True
+    # Naam/symbol me unusual unicode (chinese, arabic etc) = aksar scam token
+    for ch in (token_name or "") + (token_symbol or ""):
+        if ord(ch) > 0x3000:  # CJK aur baaki non-latin range
+            return True
+    return False
+
+
 async def get_token_price(symbol: str) -> float:
-    cg_id = COINGECKO_IDS.get(symbol.lower())
+    sym = (symbol or "").lower()
+    # Stablecoin? seedha $1
+    if sym in STABLECOINS:
+        return 1.0
+    cg_id = COINGECKO_IDS.get(sym)
     if not cg_id:
         return 0
     try:
@@ -103,6 +133,11 @@ async def webhook(request: Request):
         tx_hash = ev.get("transactionHash", "")
         token_name = ev.get("tokenName", "Unknown")
         token_symbol = ev.get("tokenSymbol", "???")
+
+        # Spam token? skip
+        if is_spam(token_name, token_symbol):
+            continue
+
         await handle_tx(from_addr, to_addr, amount, token_name, token_symbol,
                         chain_name, tx_hash)
 
@@ -116,6 +151,16 @@ async def handle_tx(from_addr, to_addr, amount, token_name, token_symbol,
         if not user:
             continue
         tx_type = "SEND" if watched == from_addr else "RECEIVE"
+
+        # Dedup: ek hi tx + wallet + type ka alert dobara mat bhejo
+        dedup_key = f"{tx_hash}:{watched}:{tx_type}"
+        if dedup_key in SEEN_TX:
+            continue
+        SEEN_TX.add(dedup_key)
+        # Set ko bahut bada hone se rokna
+        if len(SEEN_TX) > 5000:
+            SEEN_TX.clear()
+
         price = await get_token_price(token_symbol)
         usd_value = f"{amount * price:.2f}" if price else None
         await send_alert(
