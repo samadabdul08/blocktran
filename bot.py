@@ -1,6 +1,8 @@
 import asyncio
 import os
 import re
+import time
+import requests
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -24,7 +26,7 @@ CHAINS = {
     "ethereum": "🔷 Ethereum",
     "bsc": "🟡 BNB Chain",
     "polygon": "🟣 Polygon",
-    "arbitrum": "🔷 Arbitrum",
+    "arbitrum": "🔵 Arbitrum",
     "optimism": "🔴 Optimism",
     "avalanche": "🔺 Avalanche",
     "base": "🔵 Base",
@@ -33,10 +35,66 @@ CHAINS = {
     "tron": "🔴 TRON",
 }
 
+# CoinGecko IDs for native token price lookup per chain
+COINGECKO_IDS = {
+    "ethereum": "ethereum",
+    "bsc": "binancecoin",
+    "polygon": "matic-network",
+    "arbitrum": "ethereum",
+    "optimism": "ethereum",
+    "avalanche": "avalanche-2",
+    "base": "ethereum",
+    "fantom": "fantom",
+    "solana": "solana",
+    "tron": "tron",
+}
+
+# ---- Duplicate prevention: remember tx hashes we already alerted on ----
+SEEN_TX = {}            # key: f"{tx_hash}:{addr}:{tx_type}" -> timestamp
+SEEN_TTL = 600          # remember for 10 minutes
+
+def already_seen(key: str) -> bool:
+    now = time.time()
+    # cleanup old entries
+    for k in list(SEEN_TX.keys()):
+        if now - SEEN_TX[k] > SEEN_TTL:
+            del SEEN_TX[k]
+    if key in SEEN_TX:
+        return True
+    SEEN_TX[key] = now
+    return False
+
+# ---- USD price helper (CoinGecko) with small cache ----
+PRICE_CACHE = {}        # coingecko_id -> (price, timestamp)
+PRICE_TTL = 60          # cache price for 60s
+
+def get_usd_price(coingecko_id: str):
+    if not coingecko_id:
+        return None
+    now = time.time()
+    cached = PRICE_CACHE.get(coingecko_id)
+    if cached and now - cached[1] < PRICE_TTL:
+        return cached[0]
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": coingecko_id, "vs_currencies": "usd"},
+            timeout=8,
+        )
+        price = r.json().get(coingecko_id, {}).get("usd")
+        if price is not None:
+            PRICE_CACHE[coingecko_id] = (price, now)
+        return price
+    except Exception as e:
+        print(f"Price fetch failed: {e}")
+        return None
+
+
 class WalletStates(StatesGroup):
     waiting_for_name = State()
     waiting_for_rename_address = State()
     waiting_for_new_name = State()
+
 
 pending_wallets = {}
 
@@ -50,10 +108,10 @@ async def cmd_start(message: types.Message):
         "🔷 Arbitrum | 🔴 Optimism | 🔺 Avalanche\n"
         "🔵 Base | 🔵 Fantom | 🟢 Solana | 🔴 TRON\n\n"
         "<b>📋 Commands:</b>\n"
-        "/add — Add wallet\n"
-        "/list — View wallets\n"
-        "/rename — Rename wallet\n"
-        "/remove — Remove wallet\n\n"
+        "/add – Add wallet\n"
+        "/list – View wallets\n"
+        "/rename – Rename wallet\n"
+        "/remove – Remove wallet\n\n"
         "<i>💡 Just paste any wallet address to add it!</i>",
         parse_mode="HTML"
     )
@@ -74,9 +132,9 @@ async def cmd_list(message: types.Message):
         name = w.get('name') or '(no name)'
         chain = CHAINS.get(w['chain'], w['chain'])
         text += f"{chain}\n"
-        text += f"  🏷 <b>{name}</b>\n"
-        text += f"  <code>{w['address']}</code>\n"
-        text += f"  📊 {w.get('tx_count', 0)} txs\n\n"
+        text += f"   <b>{name}</b>\n"
+        text += f"   <code>{w['address']}</code>\n"
+        text += f"   {w.get('tx_count', 0)} txs\n\n"
 
     await message.answer(text, parse_mode="HTML")
 
@@ -106,7 +164,7 @@ async def process_new_name(message: types.Message, state: FSMContext):
         if w['address'] == address:
             update_wallet_name(message.from_user.id, address, w['chain'], message.text.strip())
             updated = True
-            break
+            # don't break — rename across all chains the address is saved on
 
     await state.clear()
     if updated:
@@ -118,8 +176,7 @@ async def process_new_name(message: types.Message, state: FSMContext):
 async def process_wallet_name(message: types.Message, state: FSMContext):
     data = await state.get_data()
     name = message.text.strip()
-
-    if name.lower() == '/skip':
+    if name == "/skip":
         name = ""
 
     success, result = add_wallet(
@@ -138,7 +195,7 @@ async def process_wallet_name(message: types.Message, state: FSMContext):
             f"✅ <b>Wallet added!</b>\n\n"
             f"{chain_name}\n"
             f"<code>{data['address']}</code>\n"
-            f"🏷 Name: {name or '(no name)'}\n\n"
+            f"📛 Name: {name or '(no name)'}\n\n"
             f"<i>I'll alert you on every transaction!</i>",
             parse_mode="HTML"
         )
@@ -180,7 +237,7 @@ async def handle_address(message: types.Message, state: FSMContext):
     else:
         await state.update_data(address=text, chain=detected_chains[0])
         await state.set_state(WalletStates.waiting_for_name)
-        await message.answer("✏️ Give this wallet a name (or send /skip):")
+        await message.answer("📛 Give this wallet a name (or send /skip):")
 
 @dp.callback_query(F.data.startswith("chain:"))
 async def process_chain_selection(callback: types.CallbackQuery, state: FSMContext):
@@ -206,7 +263,7 @@ async def process_chain_selection(callback: types.CallbackQuery, state: FSMConte
         register_to_moralis_stream(address)
         await state.update_data(address=address, chain=chain)
         await state.set_state(WalletStates.waiting_for_name)
-        await callback.message.edit_text("✏️ Give this wallet a name (or send /skip):")
+        await callback.message.edit_text("📛 Give this wallet a name (or send /skip):")
 
     await callback.answer()
 
@@ -217,9 +274,12 @@ async def send_alert(user_id: str, wallet_name: str, address: str, chain: str,
     direction = "🟢 RECEIVED" if tx_type == "RECEIVE" else "🔴 SENT"
     chain_name = CHAINS.get(chain, chain)
 
+    # show name if we have one, else short address
+    display_name = wallet_name if wallet_name else (address[:10] + "...")
+
     msg = (
         f"{arrow} <b>{direction}</b> — {chain_name}\n\n"
-        f"🔴 Wallet: <b>{wallet_name or address[:10]+'...'}</b>\n"
+        f"🔴 Wallet: <b>{display_name}</b>\n"
         f"📍 <code>{address[:8]}...{address[-6:]}</code>\n\n"
         f"🪙 Token: <b>{token_name}</b> ({token_symbol})\n"
         f"💰 Amount: <b>{amount:.6f} {token_symbol}</b>"
@@ -235,6 +295,7 @@ async def send_alert(user_id: str, wallet_name: str, address: str, chain: str,
         await bot.send_message(user_id, msg, parse_mode="HTML", disable_web_page_preview=True)
     except Exception as e:
         print(f"Alert send failed: {e}")
+
 
 from aiohttp import web
 
@@ -257,7 +318,10 @@ async def moralis_webhook(request):
         "0x2105": "base", "0xfa": "fantom",
     }
     chain = chain_map.get(chain_hex, "ethereum")
+    cg_id = COINGECKO_IDS.get(chain)
+    native_symbol = "BNB" if chain == "bsc" else "ETH" if chain in ("ethereum", "arbitrum", "optimism", "base") else "NATIVE"
 
+    # ---- Native transfers ----
     for tx in txs:
         to_addr = (tx.get("toAddress") or "").lower()
         from_addr = (tx.get("fromAddress") or "").lower()
@@ -265,30 +329,46 @@ async def moralis_webhook(request):
         if value == 0:
             continue
         amount = value / 1e18
+        tx_hash = tx.get("hash", "")
+
+        # USD value
+        price = get_usd_price(cg_id)
+        usd_value = f"{amount * price:,.2f}" if price else ""
+
         for addr, tx_type in [(to_addr, "RECEIVE"), (from_addr, "SEND")]:
             user = get_user_by_wallet(addr, chain)
-            if user:
-                await send_alert(
-                    user["user_id"], user.get("name", ""), addr, chain,
-                    tx_type, "Native", "ETH" if chain == "ethereum" else "BNB",
-                    amount, "", tx.get("hash", "")
-                )
+            if not user:
+                continue
+            # duplicate guard
+            if already_seen(f"{tx_hash}:{addr}:{tx_type}"):
+                continue
+            await send_alert(
+                user["user_id"], user.get("name", ""), addr, chain,
+                tx_type, "Native", native_symbol,
+                amount, usd_value, tx_hash
+            )
 
+    # ---- ERC20 token transfers ----
     for ev in erc20:
         to_addr = (ev.get("to") or "").lower()
         from_addr = (ev.get("from") or "").lower()
         decimals = int(ev.get("tokenDecimals", "18") or "18")
         raw = int(ev.get("value", "0") or "0")
         amount = raw / (10 ** decimals)
+        tx_hash = ev.get("transactionHash", "")
+        token_symbol = ev.get("tokenSymbol", "")
+
         for addr, tx_type in [(to_addr, "RECEIVE"), (from_addr, "SEND")]:
             user = get_user_by_wallet(addr, chain)
-            if user:
-                await send_alert(
-                    user["user_id"], user.get("name", ""), addr, chain,
-                    tx_type, ev.get("tokenName", "Token"),
-                    ev.get("tokenSymbol", ""), amount, "",
-                    ev.get("transactionHash", "")
-                )
+            if not user:
+                continue
+            if already_seen(f"{tx_hash}:{addr}:{tx_type}:{token_symbol}"):
+                continue
+            await send_alert(
+                user["user_id"], user.get("name", ""), addr, chain,
+                tx_type, ev.get("tokenName", "Token"),
+                token_symbol, amount, "", tx_hash
+            )
 
     return web.Response(text="ok")
 
