@@ -17,6 +17,8 @@ load_dotenv()
 bot = Bot(token=os.getenv("TELEGRAM_BOT_TOKEN"))
 dp = Dispatcher(storage=MemoryStorage())
 
+MORALIS_API_KEY = os.getenv("MORALIS_API_KEY")
+
 # EVM address pattern
 EVM_PATTERN = re.compile(r'^0x[a-fA-F0-9]{40}$')
 SOL_PATTERN = re.compile(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$')
@@ -35,21 +37,31 @@ CHAINS = {
     "tron": "🔴 TRON",
 }
 
-# CoinGecko IDs for native token price lookup per chain
-COINGECKO_IDS = {
-    "ethereum": "ethereum",
-    "bsc": "binancecoin",
-    "polygon": "matic-network",
-    "arbitrum": "ethereum",
-    "optimism": "ethereum",
-    "avalanche": "avalanche-2",
-    "base": "ethereum",
-    "fantom": "fantom",
-    "solana": "solana",
-    "tron": "tron",
+# Chain name -> Moralis chain hex (price API ke liye)
+MORALIS_CHAIN_HEX = {
+    "ethereum": "0x1",
+    "bsc": "0x38",
+    "polygon": "0x89",
+    "arbitrum": "0xa4b1",
+    "optimism": "0xa",
+    "avalanche": "0xa86a",
+    "base": "0x2105",
+    "fantom": "0xfa",
 }
 
-# ---- Stablecoins -> hamesha $1 (token price API ki zaroorat nahi) ----
+# Native coin ka price laane ke liye uske wrapped version ka contract use hota hai
+WRAPPED_NATIVE = {
+    "ethereum": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",  # WETH
+    "bsc":      "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",  # WBNB
+    "polygon":  "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",  # WMATIC
+    "arbitrum": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",  # WETH
+    "optimism": "0x4200000000000000000000000000000000000006",  # WETH
+    "avalanche":"0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",  # WAVAX
+    "base":     "0x4200000000000000000000000000000000000006",  # WETH
+    "fantom":   "0x21be370D5312f44cB42ce377BC9b8a0cEF1A4C83",  # WFTM
+}
+
+# ---- Stablecoins -> hamesha $1 (koi API call nahi) ----
 STABLECOINS = {
     "usdt", "usdc", "dai", "busd", "tusd", "usdp",
     "bsc-usd", "fdusd", "usde", "usdd",
@@ -63,24 +75,17 @@ def is_spam(token_name, token_symbol):
     sym = (token_symbol or "").strip().lower()
     if name in SPAM_TOKENS or sym in SPAM_TOKENS:
         return True
-    # naam/symbol me chinese/non-latin char = aksar scam token
     for ch in (token_name or "") + (token_symbol or ""):
-        if ord(ch) > 0x3000:
+        if ord(ch) > 0x3000:  # chinese/non-latin = aksar scam
             return True
     return False
 
-def stable_usd(token_symbol, amount):
-    if (token_symbol or "").lower() in STABLECOINS:
-        return f"{amount:,.2f}"
-    return ""
-
-# ---- Duplicate prevention: remember tx hashes we already alerted on ----
+# ---- Duplicate prevention ----
 SEEN_TX = {}            # key: f"{tx_hash}:{addr}:{tx_type}" -> timestamp
-SEEN_TTL = 600          # remember for 10 minutes
+SEEN_TTL = 600
 
 def already_seen(key: str) -> bool:
     now = time.time()
-    # cleanup old entries
     for k in list(SEEN_TX.keys()):
         if now - SEEN_TX[k] > SEEN_TTL:
             del SEEN_TX[k]
@@ -89,30 +94,53 @@ def already_seen(key: str) -> bool:
     SEEN_TX[key] = now
     return False
 
-# ---- USD price helper (CoinGecko) with small cache ----
-PRICE_CACHE = {}        # coingecko_id -> (price, timestamp)
-PRICE_TTL = 60          # cache price for 60s
+# ---- USD price via Moralis token price API (har token, har chain) ----
+PRICE_CACHE = {}        # key: f"{chain}:{token_addr}" -> (price, timestamp)
+PRICE_TTL = 600         # 10 min cache (reliable, API load kam)
 
-def get_usd_price(coingecko_id: str):
-    if not coingecko_id:
+def moralis_token_price(chain: str, token_address: str):
+    """Kisi bhi token ka USD price Moralis se. Fail hone pe None."""
+    if not token_address or not MORALIS_API_KEY:
         return None
+    chain_hex = MORALIS_CHAIN_HEX.get(chain)
+    if not chain_hex:
+        return None
+
+    cache_key = f"{chain}:{token_address.lower()}"
     now = time.time()
-    cached = PRICE_CACHE.get(coingecko_id)
+    cached = PRICE_CACHE.get(cache_key)
     if cached and now - cached[1] < PRICE_TTL:
         return cached[0]
+
     try:
+        url = f"https://deep-index.moralis.io/api/v2.2/erc20/{token_address}/price"
         r = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": coingecko_id, "vs_currencies": "usd"},
+            url,
+            params={"chain": chain_hex},
+            headers={"X-API-Key": MORALIS_API_KEY},
             timeout=8,
         )
-        price = r.json().get(coingecko_id, {}).get("usd")
-        if price is not None:
-            PRICE_CACHE[coingecko_id] = (price, now)
-        return price
-    except Exception as e:
-        print(f"Price fetch failed: {e}")
+        if r.status_code == 200:
+            price = r.json().get("usdPrice")
+            if price is not None:
+                PRICE_CACHE[cache_key] = (price, now)
+                return price
         return None
+    except Exception as e:
+        print(f"Moralis price fetch failed: {e}")
+        return None
+
+def compute_usd(chain, token_symbol, token_address, amount, is_native=False):
+    """USD value string. Stablecoin->$1, native->wrapped price, baaki->moralis."""
+    sym = (token_symbol or "").lower()
+    if sym in STABLECOINS:
+        return f"{amount:,.2f}"
+    if is_native:
+        waddr = WRAPPED_NATIVE.get(chain)
+        price = moralis_token_price(chain, waddr) if waddr else None
+        return f"{amount * price:,.2f}" if price else ""
+    price = moralis_token_price(chain, token_address)
+    return f"{amount * price:,.2f}" if price else ""
 
 
 class WalletStates(StatesGroup):
@@ -189,7 +217,6 @@ async def process_new_name(message: types.Message, state: FSMContext):
         if w['address'] == address:
             update_wallet_name(message.from_user.id, address, w['chain'], message.text.strip())
             updated = True
-            # don't break — rename across all chains the address is saved on
 
     await state.clear()
     if updated:
@@ -233,7 +260,6 @@ async def handle_address(message: types.Message, state: FSMContext):
         return
     text = message.text.strip()
 
-    # Detect chain from address
     detected_chains = []
     if EVM_PATTERN.match(text):
         detected_chains = ["ethereum", "bsc", "polygon", "arbitrum", "optimism", "avalanche", "base", "fantom"]
@@ -246,7 +272,6 @@ async def handle_address(message: types.Message, state: FSMContext):
         await message.answer("❓ I didn't understand that. Use /help or send a wallet address.")
         return
 
-    # For EVM — ask which chain or all
     if len(detected_chains) > 1:
         keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text=CHAINS[c], callback_data=f"chain:{text}:{c}")
@@ -299,7 +324,6 @@ async def send_alert(user_id: str, wallet_name: str, address: str, chain: str,
     direction = "🟢 RECEIVED" if tx_type == "RECEIVE" else "🔴 SENT"
     chain_name = CHAINS.get(chain, chain)
 
-    # show name if we have one, else short address
     display_name = wallet_name if wallet_name else (address[:10] + "...")
 
     msg = (
@@ -343,7 +367,6 @@ async def moralis_webhook(request):
         "0x2105": "base", "0xfa": "fantom",
     }
     chain = chain_map.get(chain_hex, "ethereum")
-    cg_id = COINGECKO_IDS.get(chain)
     native_symbol = "BNB" if chain == "bsc" else "ETH" if chain in ("ethereum", "arbitrum", "optimism", "base") else "NATIVE"
 
     # ---- Native transfers ----
@@ -356,15 +379,12 @@ async def moralis_webhook(request):
         amount = value / 1e18
         tx_hash = tx.get("hash", "")
 
-        # USD value
-        price = get_usd_price(cg_id)
-        usd_value = f"{amount * price:,.2f}" if price else ""
+        usd_value = compute_usd(chain, native_symbol, None, amount, is_native=True)
 
         for addr, tx_type in [(to_addr, "RECEIVE"), (from_addr, "SEND")]:
             user = get_user_by_wallet(addr, chain)
             if not user:
                 continue
-            # duplicate guard
             if already_seen(f"{tx_hash}:{addr}:{tx_type}"):
                 continue
             await send_alert(
@@ -383,20 +403,17 @@ async def moralis_webhook(request):
         tx_hash = ev.get("transactionHash", "")
         token_symbol = ev.get("tokenSymbol", "")
         token_name = ev.get("tokenName", "Token")
+        token_address = ev.get("contract") or ev.get("tokenAddress") or ""
 
-        # spam token? skip
         if is_spam(token_name, token_symbol):
             continue
 
-        # USD value: stablecoin -> $1 ke hisaab se
-        usd_value = stable_usd(token_symbol, amount)
+        usd_value = compute_usd(chain, token_symbol, token_address, amount, is_native=False)
 
         for addr, tx_type in [(to_addr, "RECEIVE"), (from_addr, "SEND")]:
             user = get_user_by_wallet(addr, chain)
             if not user:
                 continue
-            # token-AGNOSTIC dedup: same tx + wallet + type = ek hi alert
-            # (token_symbol NAHI daala, taki USDT/BSC-USD ek hi tx ke 2 alert na ban jayein)
             if already_seen(f"{tx_hash}:{addr}:{tx_type}"):
                 continue
             await send_alert(
