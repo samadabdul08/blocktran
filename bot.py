@@ -49,6 +49,31 @@ COINGECKO_IDS = {
     "tron": "tron",
 }
 
+# ---- Stablecoins -> hamesha $1 (token price API ki zaroorat nahi) ----
+STABLECOINS = {
+    "usdt", "usdc", "dai", "busd", "tusd", "usdp",
+    "bsc-usd", "fdusd", "usde", "usdd",
+}
+
+# ---- Spam token block list (lowercase symbol ya naam) ----
+SPAM_TOKENS = {"\u5e03\u5e03"}  # 布布
+
+def is_spam(token_name, token_symbol):
+    name = (token_name or "").strip().lower()
+    sym = (token_symbol or "").strip().lower()
+    if name in SPAM_TOKENS or sym in SPAM_TOKENS:
+        return True
+    # naam/symbol me chinese/non-latin char = aksar scam token
+    for ch in (token_name or "") + (token_symbol or ""):
+        if ord(ch) > 0x3000:
+            return True
+    return False
+
+def stable_usd(token_symbol, amount):
+    if (token_symbol or "").lower() in STABLECOINS:
+        return f"{amount:,.2f}"
+    return ""
+
 # ---- Duplicate prevention: remember tx hashes we already alerted on ----
 SEEN_TX = {}            # key: f"{tx_hash}:{addr}:{tx_type}" -> timestamp
 SEEN_TTL = 600          # remember for 10 minutes
@@ -357,17 +382,27 @@ async def moralis_webhook(request):
         amount = raw / (10 ** decimals)
         tx_hash = ev.get("transactionHash", "")
         token_symbol = ev.get("tokenSymbol", "")
+        token_name = ev.get("tokenName", "Token")
+
+        # spam token? skip
+        if is_spam(token_name, token_symbol):
+            continue
+
+        # USD value: stablecoin -> $1 ke hisaab se
+        usd_value = stable_usd(token_symbol, amount)
 
         for addr, tx_type in [(to_addr, "RECEIVE"), (from_addr, "SEND")]:
             user = get_user_by_wallet(addr, chain)
             if not user:
                 continue
-            if already_seen(f"{tx_hash}:{addr}:{tx_type}:{token_symbol}"):
+            # token-AGNOSTIC dedup: same tx + wallet + type = ek hi alert
+            # (token_symbol NAHI daala, taki USDT/BSC-USD ek hi tx ke 2 alert na ban jayein)
+            if already_seen(f"{tx_hash}:{addr}:{tx_type}"):
                 continue
             await send_alert(
                 user["user_id"], user.get("name", ""), addr, chain,
-                tx_type, ev.get("tokenName", "Token"),
-                token_symbol, amount, "", tx_hash
+                tx_type, token_name,
+                token_symbol, amount, usd_value, tx_hash
             )
 
     return web.Response(text="ok")
