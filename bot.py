@@ -182,13 +182,14 @@ async def cmd_list(message: types.Message):
 
     text = f"<b>📋 Your Wallets ({len(wallets)})</b>\n\n"
     for w in wallets:
-        name = w.get('name') or '(no name)'
+        import html
+        name = html.escape(w.get('name') or '(no name)')
         chain = CHAINS.get(w['chain'], w['chain'])
+        addr = html.escape(w['address'])
         text += f"{chain}\n"
         text += f"   <b>{name}</b>\n"
-        text += f"   <code>{w['address']}</code>\n"
+        text += f"   <code>{addr}</code>\n"
         text += f"   {w.get('tx_count', 0)} txs\n\n"
-
     await message.answer(text, parse_mode="HTML")
 
 @dp.message(Command("rename"))
